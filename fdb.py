@@ -8,10 +8,16 @@ import hashlib
 import os.path
 import sqlite3
 import mimetypes
+import logging
 import shutil
+import re
 
 def time2str(t):
     return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))
+
+WORDS = re.compile(r'\w+', re.U)
+def getwords(s):
+    return WORDS.findall(s)
 
 MDB_DEFS = '''
 CREATE TABLE IF NOT EXISTS Entries (
@@ -109,23 +115,27 @@ class FileDB:
         st = os.stat(path)
         self._add_attr(eid, 'ctime', time2str(st[stat.ST_CTIME]))
         self._add_attr(eid, 'mtime', time2str(st[stat.ST_MTIME]))
+        for w in getwords(path):
+            self._add_attr(eid, 'tag', w.lower())
         return
 
 
 def main(argv):
     import getopt
     def usage():
-        print('usage: %s [-d] basedir {add|remove|list|show|tag} [args ...]]' % argv[0])
+        print(f'usage: {argv[0]} ' '[-d] basedir {add|remove|list|show|tag} [args ...]')
         return 100
     try:
         (opts, args) = getopt.getopt(argv[1:], 'do:')
     except getopt.GetoptError:
         return usage()
-    debug = 0
+    level = logging.INFO
     output = None
     for (k, v) in opts:
-        if k == '-d': debug += 1
+        if k == '-d': level = logging.DEBUG
         elif k == '-o': output = v
+    logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=level)
+
     if not args: return usage()
     basedir = args.pop(0)
     db = FileDB(basedir)
@@ -134,12 +144,17 @@ def main(argv):
         cmd = args.pop(0)
     if cmd == 'add':
         for arg in args:
-            for (dirpath,dirnames,filenames) in os.walk(arg):
-                for name in filenames:
-                    if name.startswith('.'): continue
-                    path = os.path.join(dirpath, name)
-                    print('adding: %r...' % path)
-                    db.add(path)
+            if os.path.isfile(arg):
+                path = arg
+                logging.info(f'adding: {path!r}...')
+                db.add(path)
+            elif os.path.isdir(arg):
+                for (dirpath,dirnames,filenames) in os.walk(arg):
+                    for name in filenames:
+                        if name.startswith('.'): continue
+                        path = os.path.join(dirpath, name)
+                        logging.info(f'adding: {path!r}...')
+                        db.add(path)
     elif cmd == 'remove':
         pass
     elif cmd == 'list':
