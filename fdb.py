@@ -58,7 +58,7 @@ def identify_video(path, position=0, thumb_size=(128,128)):
         p = Popen(args, stdin=DEVNULL, stdout=PIPE, stderr=DEVNULL, encoding='utf-8')
         obj = json.load(p.stdout)
         fmt = obj['format']
-        attrs['duration'] = str(int(float(fmt['duration'])+.5))
+        attrs['duration'] = int(float(fmt['duration'])+.5)
         tags = fmt['tags']
         if 'creation_time' in tags:
             v = tags['creation_time']
@@ -67,10 +67,10 @@ def identify_video(path, position=0, thumb_size=(128,128)):
         for strm in obj['streams']:
             if 'width' in strm:
                 v = strm['width']
-                attrs['width'] = str(v)
+                attrs['width'] = v
             if 'height' in strm:
                 v = strm['height']
-                attrs['height'] = str(v)
+                attrs['height'] = v
         p.wait()
     except OSError:
         pass
@@ -96,14 +96,23 @@ def identify_image(path, thumb_size=(128,128)):
         attrs['width'] = img.width
         attrs['height'] = img.height
         exif = img.getexif()
+        rotation = 0
         for (k,v) in exif.items():
             k = ExifTags.TAGS.get(k)
             if k == 'ImageDescription':
                 attrs['description'] = v
+            elif k == 'Orientation':
+                if v == 8:
+                    rotation = 90
+                elif v == 3:
+                    rotation = 180
+                elif v == 6:
+                    rotation = 270
+                attrs['rotation'] = rotation
             elif k == 'DateTime' or k == 'DateTimeOriginal':
                 t = time.strptime(v, '%Y:%m:%d %H:%M:%S')
                 timestamp = time2str(t)
-        thumbnail = get_thumbnail(img, thumb_size)
+        thumbnail = get_thumbnail(img.rotate(rotation), thumb_size)
     except (OSError, UnidentifiedImageError):
         pass
     return (timestamp, attrs, thumbnail)
@@ -213,7 +222,7 @@ class FileDB:
         for (name, value) in attrs:
             self._cur.execute(
                 'INSERT INTO Attrs VALUES (?, ?, ?);',
-                (eid, name, value))
+                (eid, name, str(value)))
         return
 
     def _add_log(self, eid, action):
