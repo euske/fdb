@@ -22,6 +22,8 @@ from subprocess import Popen, PIPE, DEVNULL
 
 def time2str(t):
     return time.strftime('%Y-%m-%d %H:%M:%S', t)
+def str2time(t):
+    return time.strptime(t, '%Y-%m-%d %H:%M:%S')
 
 WORDS = re.compile(r'\w+', re.U)
 def get_words(text):
@@ -56,20 +58,19 @@ def identify_video(path, position=0, thumb_size=(128,128)):
         p = Popen(args, stdin=DEVNULL, stdout=PIPE, stderr=DEVNULL, encoding='utf-8')
         obj = json.load(p.stdout)
         fmt = obj['format']
-        attrs['video_duration'] = fmt['duration']
+        attrs['duration'] = str(int(float(fmt['duration'])+.5))
         tags = fmt['tags']
         if 'creation_time' in tags:
             v = tags['creation_time']
-            (v,_,_) = v.partition('.')
-            t = time.strptime(v, '%Y-%m-%dT%H:%M:%S')
+            t = time.strptime(v[:19], '%Y-%m-%dT%H:%M:%S')
             timestamp = time2str(t)
         for strm in obj['streams']:
             if 'width' in strm:
                 v = strm['width']
-                attrs['video_width'] = str(v)
+                attrs['width'] = str(v)
             if 'height' in strm:
                 v = strm['height']
-                attrs['video_height'] = str(v)
+                attrs['height'] = str(v)
         p.wait()
     except OSError:
         pass
@@ -92,11 +93,13 @@ def identify_image(path, thumb_size=(128,128)):
     thumbnail = None
     try:
         img = Image.open(path)
+        attrs['width'] = img.width
+        attrs['height'] = img.height
         exif = img.getexif()
         for (k,v) in exif.items():
             k = ExifTags.TAGS.get(k)
             if k == 'ImageDescription':
-                attrs['image_description'] = v
+                attrs['description'] = v
             elif k == 'DateTime' or k == 'DateTimeOriginal':
                 t = time.strptime(v, '%Y:%m:%d %H:%M:%S')
                 timestamp = time2str(t)
@@ -162,12 +165,29 @@ class FileDB:
         return path
 
     def _get_entry(self, eid):
-        for (filename, filetype, filesize) in cur.execute(
-                'SELECT fileName, fileType, fileSize FROM Entries'
+        for (timestamp, filename, filetype, filesize) in self._cur.execute(
+                'SELECT timestamp, fileName, fileType, fileSize FROM Entries'
                 ' WHERE entryId=?;',
                 (eid,)):
-            return (filename, filetype, filesize)
+            return (timestamp, filename, filetype, filesize)
         raise KeyError(eid)
+
+    def _list_entry(self, query):
+        cur = self.mdb.cursor()
+        for (eid, timestamp, filetype, filesize) in cur.execute(
+                'SELECT entryId, timestamp, fileType, fileSize FROM Entries ORDER BY timestamp DESC;'):
+            attrs = self._get_attrs(eid)
+            yield (eid, timestamp, filetype, filesize, attrs)
+        return
+
+    def _get_attrs(self, eid):
+        attrs = []
+        for (attrName, attrValue) in self._cur.execute(
+                'SELECT attrName, attrValue FROM Attrs'
+                ' WHERE entryId=?;',
+                (eid,)):
+            attrs.append((attrName, attrValue))
+        return attrs
 
     def _add_entry(self, path):
         self.logger.debug(f'add_entry: {path}')
@@ -214,8 +234,9 @@ class FileDB:
         attrs = [('path', path)]
         for w in get_words(path):
             attrs.append(('tag', w))
+        timestamp = thumbnail = None
         if filetype is None:
-            timestamp = thumbnail = None
+            pass
         elif filetype.startswith('video/') or filetype.startswith('audio/'):
             (timestamp, attrs1, thumbnail) = identify_video(
                 path, thumb_size=self.THUMB_SIZE)
@@ -239,6 +260,20 @@ class FileDB:
         self._add_log(eid, 'add')
         return
 
+    def list(self, args):
+        for (eid, timestamp, filetype, filesize, attrs) in self._list_entry(args):
+            tags = [ v for (k,v) in attrs if k == 'tag' ]
+            attrs = dict(attrs)
+            a = []
+            if 'width' and 'height' in attrs:
+                a.append(f'({attrs["width"]}x{attrs["height"]})')
+            if 'duration' in attrs:
+                a.append(f'[{attrs["duration"]}s]')
+            if 'descriotion' in attrs:
+                a.append(attrs['description'])
+            a.append('{'+', '.join(tags)+'}')
+            print(timestamp, filetype, filesize, ' '.join(a))
+        return
 
 def main(argv):
     import getopt
