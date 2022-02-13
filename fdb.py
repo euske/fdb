@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+##
+##  usage:
+##     ./fdb.py dir add *.jpg *.mp3
+##
 import sys
 import os
 import time
@@ -10,74 +14,105 @@ import sqlite3
 import mimetypes
 import logging
 import shutil
+import json
 import re
+from io import BytesIO
+from PIL import Image, ExifTags, UnidentifiedImageError
+from subprocess import Popen, PIPE, DEVNULL
 
 def time2str(t):
     return time.strftime('%Y-%m-%d %H:%M:%S', t)
 
 WORDS = re.compile(r'\w+', re.U)
-def getwords(s):
-    return WORDS.findall(s)
+def get_words(text):
+    return [ w.lower() for w in WORDS.findall(text) ]
 
-def identify_mplayer(path):
-    from subprocess import Popen, PIPE, DEVNULL
-    args = (
-        'mplayer', '-really-quiet', '-noconfig', 'all',
-        '-vo', 'null', '-ao', 'null', '-frames', '0',
-        '-identify', path)
+def get_filehash(path, bufsize=1024*1024):
+    filesize = 0
+    h = hashlib.sha1()
+    with open(path, 'rb') as fp:
+        while True:
+            data = fp.read(bufsize)
+            filesize += len(data)
+            if not data: break
+            h.update(data)
+    filehash = h.hexdigest()
+    return (filesize, filehash)
+
+def get_thumbnail(img, size):
+    img.thumbnail(size)
+    fp = BytesIO()
+    img.save(fp, format='jpeg')
+    return fp.getvalue()
+
+def identify_video(path, position=0, thumb_size=(128,128)):
+    timestamp = None
     attrs = {}
+    thumbnail = None
+    args = (
+        'ffprobe', '-of', 'json', '-show_format', '-show_streams',
+        path)
     try:
         p = Popen(args, stdin=DEVNULL, stdout=PIPE, stderr=DEVNULL, encoding='utf-8')
-        a = {}
-        ck = None
-        for line in p.stdout:
-            (k,_,v) = line.strip().partition('=')
-            a[k] = v
-            if k == 'ID_LENGTH':
-                attrs['length'] = v
-            elif k == 'ID_VIDEO_WIDTH':
-                attrs['width'] = v
-            elif k == 'ID_VIDEO_HEIGHT':
-                attrs['height'] = v
-            elif k == 'ID_VIDEO_FPS':
-                attrs['fps'] = v
-            elif k.startswith('ID_CLIP_INFO_NAME') and v == 'creation_time':
-                ck = 'ID_CLIP_INFO_VALUE'+k[17:]
-        if ck is not None:
-            t = time.strptime(a[ck][:19], '%Y-%m-%dT%H:%M:%S')
-            attrs['datetime'] = time2str(t)
+        obj = json.load(p.stdout)
+        fmt = obj['format']
+        attrs['video_duration'] = fmt['duration']
+        tags = fmt['tags']
+        if 'creation_time' in tags:
+            v = tags['creation_time']
+            (v,_,_) = v.partition('.')
+            t = time.strptime(v, '%Y-%m-%dT%H:%M:%S')
+            timestamp = time2str(t)
+        for strm in obj['streams']:
+            if 'width' in strm:
+                v = strm['width']
+                attrs['video_width'] = str(v)
+            if 'height' in strm:
+                v = strm['height']
+                attrs['video_height'] = str(v)
+        p.wait()
     except OSError:
         pass
-    return list(attrs.items())
+    args = (
+        'ffmpeg', '-y', '-ss', str(position),
+        '-i', path, '-f', 'image2', '-vframes', '1', '-')
+    try:
+        p = Popen(args, stdin=DEVNULL, stdout=PIPE, stderr=DEVNULL, encoding=None)
+        data = p.stdout.read()
+        p.wait()
+        img = Image.open(BytesIO(data))
+        thumbnail = get_thumbnail(img, thumb_size)
+    except OSError:
+        pass
+    return (timestamp, attrs, thumbnail)
 
-EXIF_TAGS = ('ImageDescription', 'Model', 'DateTimeOriginal', 'DateTime')
-def identify_pil(path):
-    from PIL import Image, ExifTags, UnidentifiedImageError
+def identify_image(path, thumb_size=(128,128)):
+    timestamp = None
     attrs = {}
+    thumbnail = None
     try:
         img = Image.open(path)
         exif = img.getexif()
         for (k,v) in exif.items():
             k = ExifTags.TAGS.get(k)
             if k == 'ImageDescription':
-                attrs['description'] = v
-            elif k == 'Model':
-                attrs['model'] = v
+                attrs['image_description'] = v
             elif k == 'DateTime' or k == 'DateTimeOriginal':
                 t = time.strptime(v, '%Y:%m:%d %H:%M:%S')
-                attrs['datetime'] = time2str(t)
+                timestamp = time2str(t)
+        thumbnail = get_thumbnail(img, thumb_size)
     except (OSError, UnidentifiedImageError):
         pass
-    return list(attrs.items())
+    return (timestamp, attrs, thumbnail)
 
 MDB_DEFS = '''
 CREATE TABLE IF NOT EXISTS Entries (
   entryId INTEGER PRIMARY KEY,
+  timestamp TEXT,
   fileName TEXT,
   fileType TEXT,
   fileSize INTEGER,
-  fileHash TEXT,
-  dateAdded TEXT);
+  fileHash TEXT);
 
 CREATE TABLE IF NOT EXISTS Attrs (
   entryId INTEGER,
@@ -93,11 +128,16 @@ CREATE TABLE IF NOT EXISTS Logs (
 
 class FileDB:
 
-    BUFSIZE = 1024*1024
     MDB_NAME = 'metadata.db'
+    THUMB_SIZE = (128,128)
 
     def __init__(self, basedir, dryrun=0):
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.basedir = basedir
+        self.origdir = os.path.join(basedir, 'orig')
+        os.makedirs(self.origdir, exist_ok=True)
+        self.thumbdir = os.path.join(basedir, 'thumb')
+        os.makedirs(self.thumbdir, exist_ok=True)
         self.dryrun = dryrun
         self.mdb = sqlite3.connect(os.path.join(basedir, self.MDB_NAME))
         self._init_mdb()
@@ -112,10 +152,10 @@ class FileDB:
         self.mdb.executescript(MDB_DEFS)
         return
 
-    def _get_path(self, name):
+    def _get_path(self, subdir, name):
         assert 2 < len(name)
         prefix = name[:2]
-        dirpath = os.path.join(self.basedir, prefix)
+        dirpath = os.path.join(subdir, prefix)
         if not os.path.exists(dirpath):
             os.makedirs(dirpath)
         path = os.path.join(dirpath, name)
@@ -130,17 +170,9 @@ class FileDB:
         raise KeyError(eid)
 
     def _add_entry(self, path):
-        logging.debug(f'add_entry: {path}')
+        self.logger.debug(f'add_entry: {path}')
         cur = self._cur
-        h = hashlib.sha1()
-        filesize = 0
-        with open(path, 'rb') as fp:
-            while True:
-                data = fp.read(self.BUFSIZE)
-                filesize += len(data)
-                if not data: break
-                h.update(data)
-        filehash = h.hexdigest()
+        (filesize, filehash) = get_filehash(path)
         for (eid,filetype) in cur.execute(
                 'SELECT entryId, fileType FROM Entries'
                 ' WHERE fileSize=? AND fileHash=?;',
@@ -151,13 +183,13 @@ class FileDB:
             filename = uuid.uuid4().hex + ext.lower()
             (filetype,_) = mimetypes.guess_type(path)
             cur.execute(
-                'INSERT INTO Entries VALUES (NULL, ?, ?, ?, ?, datetime());',
+                'INSERT INTO Entries VALUES (NULL, NULL, ?, ?, ?, ?);',
                 (filename, filetype, filesize, filehash))
             eid = cur.lastrowid
             return (filename, filetype, eid)
 
     def _add_attrs(self, eid, attrs):
-        logging.debug(f'add_attrs: {eid} {attrs}')
+        self.logger.debug(f'add_attrs: {eid} {attrs}')
         for (name, value) in attrs:
             self._cur.execute(
                 'INSERT INTO Attrs VALUES (?, ?, ?);',
@@ -171,27 +203,40 @@ class FileDB:
         return
 
     def add(self, path):
-        logging.info(f'adding: {path!r}...')
-        (name, filetype, eid) = self._add_entry(path)
-        if name is None: return
+        (filename, filetype, eid) = self._add_entry(path)
+        if filename is None:
+            self.logger.info(f'ignored: {path!r}...')
+            return
+        self.logger.info(f'adding: {path!r}...')
         if not self.dryrun:
-            dst = self._get_path(name)
+            dst = self._get_path(self.origdir, filename)
             shutil.copyfile(path, dst)
-        st = os.stat(path)
-        attrs = [
-            ('path', path),
-            ('ctime', time2str(time.gmtime(st[stat.ST_CTIME]))),
-            ('mtime', time2str(time.gmtime(st[stat.ST_MTIME]))),
-        ]
-        for w in getwords(path):
-            attrs.append(('tag', w.lower()))
+        attrs = [('path', path)]
+        for w in get_words(path):
+            attrs.append(('tag', w))
         if filetype is None:
-            pass
+            timestamp = thumbnail = None
         elif filetype.startswith('video/') or filetype.startswith('audio/'):
-            attrs.extend(identify_mplayer(path))
+            (timestamp, attrs1, thumbnail) = identify_video(
+                path, thumb_size=self.THUMB_SIZE)
+            attrs.extend(attrs1.items())
         elif filetype.startswith('image/'):
-            attrs.extend(identify_pil(path))
+            (timestamp, attrs1, thumbnail) = identify_image(
+                path, thumb_size=self.THUMB_SIZE)
+            attrs.extend(attrs1.items())
+        if timestamp is None:
+            st = os.stat(path)
+            timestamp = time2str(time.gmtime(st[stat.ST_CTIME]))
+        self._cur.execute(
+            'UPDATE Entries SET timestamp=? WHERE entryId=?;',
+            (timestamp, eid))
         self._add_attrs(eid, attrs)
+        if not self.dryrun and thumbnail is not None:
+            (name,_) = os.path.splitext(filename)
+            dst = self._get_path(self.thumbdir, name+'.jpg')
+            with open(dst, 'wb') as fp:
+                fp.write(thumbnail)
+        self._add_log(eid, 'add')
         return
 
 
@@ -212,7 +257,7 @@ def main(argv):
         if k == '-v': level = logging.DEBUG
         elif k == '-n': dryrun = True
         elif k == '-o': output = v
-    logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=level)
+    logging.basicConfig(format='%(asctime)s %(levelname)s %(name)s %(message)s', level=level)
 
     if not args: return usage()
     basedir = args.pop(0)
