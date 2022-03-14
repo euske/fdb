@@ -183,10 +183,13 @@ class FileDB:
 
     def _list_entry(self, query):
         cur = self.mdb.cursor()
-        for (eid, timestamp, filetype, filesize) in cur.execute(
-                'SELECT entryId, timestamp, fileType, fileSize FROM Entries ORDER BY timestamp DESC;'):
-            attrs = self._get_attrs(eid)
-            yield (eid, timestamp, filetype, filesize, attrs)
+        sql = 'SELECT entryId, timestamp, fileType, fileSize FROM Entries ORDER BY timestamp DESC;'
+        try:
+            for (eid, timestamp, filetype, filesize) in cur.execute(sql):
+                attrs = self._get_attrs(eid)
+                yield (eid, timestamp, filetype, filesize, attrs)
+        finally:
+            cur.close()
         return
 
     def _get_attrs(self, eid):
@@ -260,6 +263,7 @@ class FileDB:
         self._cur.execute(
             'UPDATE Entries SET timestamp=? WHERE entryId=?;',
             (timestamp, eid))
+        attrs.append(('timestamp', timestamp))
         self._add_attrs(eid, attrs)
         if not self.dryrun and thumbnail is not None:
             (name,_) = os.path.splitext(filename)
