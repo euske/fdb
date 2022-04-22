@@ -14,6 +14,7 @@ import sqlite3
 import mimetypes
 import logging
 import shutil
+import getopt
 import json
 import re
 from io import BytesIO
@@ -49,7 +50,7 @@ def get_thumbnail(img, size):
 
 def identify_video(path, position=0, thumb_size=(128,128)):
     timestamp = None
-    attrs = {}
+    attrs = { 'duration':0, 'width':0, 'height':0 }
     thumbnail = None
     args = (
         'ffprobe', '-of', 'json', '-show_format', '-show_streams',
@@ -58,12 +59,14 @@ def identify_video(path, position=0, thumb_size=(128,128)):
         p = Popen(args, stdin=DEVNULL, stdout=PIPE, stderr=DEVNULL, encoding='utf-8')
         obj = json.load(p.stdout)
         fmt = obj['format']
-        attrs['duration'] = int(float(fmt['duration'])+.5)
-        tags = fmt['tags']
-        if 'creation_time' in tags:
-            v = tags['creation_time']
-            t = time.strptime(v[:19], '%Y-%m-%dT%H:%M:%S')
-            timestamp = time2str(t)
+        if 'duration' in fmt:
+            attrs['duration'] = int(float(fmt['duration'])+.5)
+        if 'tags' in fmt:
+            tags = fmt['tags']
+            if 'creation_time' in tags:
+                v = tags['creation_time']
+                t = time.strptime(v[:19], '%Y-%m-%dT%H:%M:%S')
+                timestamp = time2str(t)
         for strm in obj['streams']:
             if 'width' in strm:
                 v = strm['width']
@@ -234,7 +237,7 @@ class FileDB:
             (eid, action))
         return
 
-    def add(self, path):
+    def add(self, path, tags=None):
         (filename, filetype, eid) = self._add_entry(path)
         if filename is None:
             self.logger.info(f'ignored: {path!r}...')
@@ -246,6 +249,8 @@ class FileDB:
         attrs = [('path', path)]
         for w in get_words(path):
             attrs.append(('tag', w))
+        for t in (tags or []):
+            attrs.append(('tag', t))
         timestamp = thumbnail = None
         if filetype is None:
             pass
@@ -288,52 +293,68 @@ class FileDB:
             print(timestamp, filetype, filesize, ' '.join(a))
         return
 
+    def help(self):
+        print(f'help:')
+        print(f'  add [-t tag] files ...')
+        return 100
+
+    def run(self, args):
+        cmd = 'list'
+        if args:
+            cmd = args.pop(0)
+        if cmd == 'add':
+            try:
+                (opts, args) = getopt.getopt(args, 't:')
+            except getopt.GetoptError:
+                return self.help()
+            tags = []
+            for (k, v) in opts:
+                if k == '-t': tags.append(v)
+            for arg in args:
+                if os.path.isfile(arg):
+                    self.add(arg, tags)
+                elif os.path.isdir(arg):
+                    for (dirpath,dirnames,filenames) in os.walk(arg):
+                        for name in filenames:
+                            if name.startswith('.'): continue
+                            path = os.path.join(dirpath, name)
+                            self.add(path, tags)
+        elif cmd == 'remove':
+            pass
+        elif cmd == 'list':
+            self.list(args)
+        elif cmd == 'show':
+            self.show(args)
+        elif cmd == 'tag':
+            self.tag(args)
+        else:
+            self.help()
+        return
+
+
 def main(argv):
-    import getopt
     def usage():
         print(f'usage: {argv[0]} '
               '[-v] [-n] basedir {add|remove|list|show|tag} [args ...]')
         return 100
     try:
-        (opts, args) = getopt.getopt(argv[1:], 'vno:')
+        (opts, args) = getopt.getopt(argv[1:], 'vn')
     except getopt.GetoptError:
         return usage()
     level = logging.INFO
     dryrun = False
-    output = None
     for (k, v) in opts:
         if k == '-v': level = logging.DEBUG
         elif k == '-n': dryrun = True
-        elif k == '-o': output = v
     logging.basicConfig(format='%(asctime)s %(levelname)s %(name)s %(message)s', level=level)
 
     if not args: return usage()
     basedir = args.pop(0)
     db = FileDB(basedir, dryrun=dryrun)
-    cmd = 'list'
-    if args:
-        cmd = args.pop(0)
-    if cmd == 'add':
-        for arg in args:
-            if os.path.isfile(arg):
-                db.add(arg)
-            elif os.path.isdir(arg):
-                for (dirpath,dirnames,filenames) in os.walk(arg):
-                    for name in filenames:
-                        if name.startswith('.'): continue
-                        path = os.path.join(dirpath, name)
-                        db.add(path)
-    elif cmd == 'remove':
-        pass
-    elif cmd == 'list':
-        db.list(args)
-    elif cmd == 'show':
-        db.show(args)
-    elif cmd == 'tag':
-        db.tag(args)
-    else:
-        usage()
-    db.close()
+    try:
+        db.run(args)
+    finally:
+        db.close()
     return
 
 if __name__ == '__main__': sys.exit(main(sys.argv))
