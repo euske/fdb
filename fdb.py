@@ -237,17 +237,18 @@ class FileDB:
             (eid, action))
         return
 
-    def add(self, path, tags=None):
+    def add(self, basedir, relpath, tags=None):
+        path = os.path.join(basedir, relpath)
         (filename, filetype, eid) = self._add_entry(path)
         if filename is None:
-            self.logger.info(f'ignored: {path!r}...')
+            self.logger.info(f'ignored: {relpath!r}...')
             return
-        self.logger.info(f'adding: {path!r}...')
+        self.logger.info(f'adding: {relpath!r}...')
         if not self.dryrun:
             dst = self._get_path(self.origdir, filename)
             shutil.copyfile(path, dst)
-        attrs = [('path', path)]
-        for w in get_words(path):
+        attrs = [('path', relpath)]
+        for w in get_words(relpath):
             attrs.append(('tag', w))
         for t in (tags or []):
             attrs.append(('tag', t))
@@ -312,13 +313,14 @@ class FileDB:
                 if k == '-t': tags.append(v)
             for arg in args:
                 if os.path.isfile(arg):
-                    self.add(arg, tags)
+                    self.add('.', arg, tags)
                 elif os.path.isdir(arg):
                     for (dirpath,dirnames,filenames) in os.walk(arg):
+                        basepath = os.path.relpath(dirpath, arg)
                         for name in filenames:
                             if name.startswith('.'): continue
-                            path = os.path.join(dirpath, name)
-                            self.add(path, tags)
+                            relpath = os.path.join(basepath, name)
+                            self.add(arg, relpath, tags)
         elif cmd == 'remove':
             pass
         elif cmd == 'list':
