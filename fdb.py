@@ -18,6 +18,9 @@ import getopt
 import json
 import re
 from io import BytesIO
+from http import HTTPStatus
+from http.server import HTTPServer
+from http.server import BaseHTTPRequestHandler
 from PIL import Image, ExifTags, UnidentifiedImageError
 from subprocess import Popen, PIPE, DEVNULL
 
@@ -140,6 +143,18 @@ CREATE TABLE IF NOT EXISTS Logs (
   timestamp TEXT,
   action TEXT);
 '''
+
+class DBHTTPRequestHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        print(self.command, self.path, self.headers)
+        self.send_error(404)
+        return
+
+    def do_HEAD(self):
+        self.send_error(404)
+        return
+
 
 class FileDB:
 
@@ -294,6 +309,19 @@ class FileDB:
             print(timestamp, filetype, filesize, ' '.join(a))
         return
 
+    def server(self, port=8080):
+        DBHTTPRequestHandler.protocol_version = 'HTTP/1.1'
+        server_address = ('', port)
+        with HTTPServer(server_address, DBHTTPRequestHandler) as httpd:
+            sa = httpd.socket.getsockname()
+            (host, port) = (sa[0], sa[1])
+            self.logger.info(f'Serving HTTP on {host} port {port} (http://{host}:{port}/) ...')
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                self.logger.info('\nKeyboard interrupt received, exiting.')
+        return
+
     def help(self):
         print(f'help:')
         print(f'  add [-t tag] files ...')
@@ -329,6 +357,15 @@ class FileDB:
             self.show(args)
         elif cmd == 'tag':
             self.tag(args)
+        elif cmd == 'server':
+            try:
+                (opts, args) = getopt.getopt(args, 'p:')
+            except getopt.GetoptError:
+                return self.help()
+            port = 8080
+            for (k, v) in opts:
+                if k == '-p': port = int(v)
+            self.server(port=port)
         else:
             self.help()
         return
@@ -337,7 +374,7 @@ class FileDB:
 def main(argv):
     def usage():
         print(f'usage: {argv[0]} '
-              '[-v] [-n] basedir {add|remove|list|show|tag} [args ...]')
+              '[-v] [-n] basedir {add|remove|list|show|tag|server} [args ...]')
         return 100
     try:
         (opts, args) = getopt.getopt(argv[1:], 'vn')
