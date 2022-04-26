@@ -20,7 +20,7 @@ import re
 from io import BytesIO
 from http import HTTPStatus
 from http.server import HTTPServer
-from http.server import BaseHTTPRequestHandler
+from http.server import SimpleHTTPRequestHandler
 from PIL import Image, ExifTags, UnidentifiedImageError
 from subprocess import Popen, PIPE, DEVNULL
 
@@ -144,15 +144,100 @@ CREATE TABLE IF NOT EXISTS Logs (
   action TEXT);
 '''
 
-class DBHTTPRequestHandler(BaseHTTPRequestHandler):
+class DBRequestHandler(SimpleHTTPRequestHandler):
+
+    DB = None
+
+    class HTTPError(OSError):
+        def __init__(self, code):
+            self.code = code
 
     def do_GET(self):
-        print(self.command, self.path, self.headers)
-        self.send_error(404)
+        try:
+            self.path = self.convert_path(self.path)
+            rs = self.headers.get('Range')
+            if rs:
+                (fp, offset, nbytes) = self.send_head_partial(rs)
+                try:
+                    fp.seek(offset)
+                    data = fp.read(nbytes)
+                    self.wfile.write(data)
+                finally:
+                    fp.close()
+                return
+            SimpleHTTPRequestHandler.do_GET(self)
+        except self.HTTPError as e:
+            self.send_error(e.code)
         return
 
     def do_HEAD(self):
-        self.send_error(404)
+        try:
+            self.path = self.convert_path(self.path)
+            rs = self.headers.get('Range')
+            if rs:
+                try:
+                    (fp, _, _) = self.send_head_partial(rs)
+                    fp.close()
+                except self.HTTPError as e:
+                    self.send_error(e.code)
+                return
+            SimpleHTTPRequestHandler.do_HEAD(self)
+        except self.HTTPError as e:
+            self.send_error(e.code)
+        return
+
+    def convert_path(self, path):
+        assert path.startswith('/')
+        (category,_,name) = path[1:].partition('/')
+        if category == 'orig':
+            return self.DB.get_path(self.DB.origdir, name)
+        elif category == 'thumb':
+            return self.DB.get_path(self.DB.thumbdir, name)
+        else:
+            raise self.HTTPError(HTTPStatus.BAD_REQUEST)
+
+    RANGE = re.compile(r'bytes=(\d+)?-(\d+)?', re.I)
+
+    def send_head_partial(self, rs):
+        m = self.RANGE.match(rs)
+        if not m:
+            raise self.HTTPError(HTTPStatus.BAD_REQUEST)
+        (s,e) = m.groups()
+        if s is None and e is None:
+            raise self.HTTPError(HTTPStatus.BAD_REQUEST)
+        path = self.translate_path(self.path)
+        ctype = self.guess_type(path)
+        try:
+            fp = open(path, 'rb')
+        except OSError:
+            raise self.HTTPError(HTTPStatus.NOT_FOUND)
+        fs = os.fstat(fp.fileno())
+        length = fs[6]
+        if s is None:
+            s = length-int(e)
+            e = length
+        elif e is None:
+            s = int(s)
+            e = length
+        else:
+            s = int(s)
+            e = int(e)+1
+        nbytes = e-s
+        try:
+            self.send_response(HTTPStatus.PARTIAL_CONTENT)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(nbytes))
+            self.send_header('Content-Range', 'bytes %d-%d/%d' % (s,e-1,length))
+            self.send_header('Last-Modified', self.date_time_string(fs.st_mtime))
+            self.end_headers()
+        except:
+            fp.close()
+            raise
+        return (fp, s, nbytes)
+
+    def end_headers(self):
+        self.send_header('Accept-Ranges', 'bytes')
+        SimpleHTTPRequestHandler.end_headers(self)
         return
 
 
@@ -182,7 +267,7 @@ class FileDB:
         self.mdb.executescript(MDB_DEFS)
         return
 
-    def _get_path(self, subdir, name):
+    def get_path(self, subdir, name):
         assert 2 < len(name)
         prefix = name[:2]
         dirpath = os.path.join(subdir, prefix)
@@ -260,7 +345,7 @@ class FileDB:
             return
         self.logger.info(f'adding: {relpath!r}...')
         if not self.dryrun:
-            dst = self._get_path(self.origdir, filename)
+            dst = self.get_path(self.origdir, filename)
             shutil.copyfile(path, dst)
         attrs = [('path', relpath)]
         for w in get_words(relpath):
@@ -288,7 +373,7 @@ class FileDB:
         self._add_attrs(eid, attrs)
         if not self.dryrun and thumbnail is not None:
             (name,_) = os.path.splitext(filename)
-            dst = self._get_path(self.thumbdir, name+'.jpg')
+            dst = self.get_path(self.thumbdir, name+'.jpg')
             with open(dst, 'wb') as fp:
                 fp.write(thumbnail)
         self._add_log(eid, 'add')
@@ -310,9 +395,10 @@ class FileDB:
         return
 
     def server(self, port=8080):
-        DBHTTPRequestHandler.protocol_version = 'HTTP/1.1'
+        DBRequestHandler.DB = self
+        DBRequestHandler.protocol_version = 'HTTP/1.1'
         server_address = ('', port)
-        with HTTPServer(server_address, DBHTTPRequestHandler) as httpd:
+        with HTTPServer(server_address, DBRequestHandler) as httpd:
             sa = httpd.socket.getsockname()
             (host, port) = (sa[0], sa[1])
             self.logger.info(f'Serving HTTP on {host} port {port} (http://{host}:{port}/) ...')
