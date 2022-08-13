@@ -127,7 +127,7 @@ MDB_DEFS = '''
 CREATE TABLE IF NOT EXISTS Entries (
   entryId INTEGER PRIMARY KEY,
   timestamp TEXT,
-  fileName TEXT,
+  fileId TEXT,
   fileType TEXT,
   fileSize INTEGER,
   fileHash TEXT);
@@ -277,20 +277,20 @@ class FileDB:
         return path
 
     def get_entry(self, eid):
-        for (timestamp, filename, filetype, filesize) in self._cur.execute(
-                'SELECT timestamp, fileName, fileType, fileSize FROM Entries'
+        for (timestamp, fileid, filetype, filesize) in self._cur.execute(
+                'SELECT timestamp, fileId, fileType, fileSize FROM Entries'
                 ' WHERE entryId=?;',
                 (eid,)):
-            return (timestamp, filename, filetype, filesize)
+            return (timestamp, fileid, filetype, filesize)
         raise KeyError(eid)
 
     def list_entry(self, query):
         cur = self.mdb.cursor()
-        sql = 'SELECT entryId, timestamp, fileName, fileType, fileSize FROM Entries ORDER BY timestamp DESC;'
+        sql = 'SELECT entryId, timestamp, fileId, fileType, fileSize FROM Entries ORDER BY timestamp DESC;'
         try:
-            for (eid, timestamp, filename, filetype, filesize) in cur.execute(sql):
+            for (eid, timestamp, fileid, filetype, filesize) in cur.execute(sql):
                 attrs = self._get_attrs(eid)
-                yield (eid, timestamp, filename, filetype, filesize, attrs)
+                yield (eid, timestamp, fileid, filetype, filesize, attrs)
         finally:
             cur.close()
         return
@@ -315,13 +315,13 @@ class FileDB:
             return (None, filetype, eid)
         else:
             (_,ext) = os.path.splitext(path)
-            filename = uuid.uuid4().hex + ext.lower()
+            fileid = uuid.uuid4().hex + ext.lower()
             (filetype,_) = mimetypes.guess_type(path)
             cur.execute(
                 'INSERT INTO Entries VALUES (NULL, NULL, ?, ?, ?, ?);',
-                (filename, filetype, filesize, filehash))
+                (fileid, filetype, filesize, filehash))
             eid = cur.lastrowid
-            return (filename, filetype, eid)
+            return (fileid, filetype, eid)
 
     def _add_attrs(self, eid, attrs):
         self.logger.debug(f'add_attrs: {eid} {attrs}')
@@ -339,13 +339,13 @@ class FileDB:
 
     def add(self, basedir, relpath, tags=None):
         path = os.path.join(basedir, relpath)
-        (filename, filetype, eid) = self._add_entry(path)
-        if filename is None:
+        (fileid, filetype, eid) = self._add_entry(path)
+        if fileid is None:
             self.logger.info(f'ignored: {relpath!r}...')
             return
         self.logger.info(f'adding: {relpath!r}...')
         if not self.dryrun:
-            dst = self.get_path(self.origdir, filename)
+            dst = self.get_path(self.origdir, fileid)
             shutil.copyfile(path, dst)
         attrs = [('path', relpath)]
         for w in get_words(relpath):
@@ -372,7 +372,7 @@ class FileDB:
         attrs.append(('timestamp', timestamp))
         self._add_attrs(eid, attrs)
         if not self.dryrun and thumbnail is not None:
-            (name,_) = os.path.splitext(filename)
+            (name,_) = os.path.splitext(fileid)
             dst = self.get_path(self.thumbdir, name+'.jpg')
             with open(dst, 'wb') as fp:
                 fp.write(thumbnail)
