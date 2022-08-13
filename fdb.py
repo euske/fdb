@@ -276,7 +276,7 @@ class FileDB:
         path = os.path.join(dirpath, name)
         return path
 
-    def _get_entry(self, eid):
+    def get_entry(self, eid):
         for (timestamp, filename, filetype, filesize) in self._cur.execute(
                 'SELECT timestamp, fileName, fileType, fileSize FROM Entries'
                 ' WHERE entryId=?;',
@@ -284,13 +284,13 @@ class FileDB:
             return (timestamp, filename, filetype, filesize)
         raise KeyError(eid)
 
-    def _list_entry(self, query):
+    def list_entry(self, query):
         cur = self.mdb.cursor()
-        sql = 'SELECT entryId, timestamp, fileType, fileSize FROM Entries ORDER BY timestamp DESC;'
+        sql = 'SELECT entryId, timestamp, fileName, fileType, fileSize FROM Entries ORDER BY timestamp DESC;'
         try:
-            for (eid, timestamp, filetype, filesize) in cur.execute(sql):
+            for (eid, timestamp, filename, filetype, filesize) in cur.execute(sql):
                 attrs = self._get_attrs(eid)
-                yield (eid, timestamp, filetype, filesize, attrs)
+                yield (eid, timestamp, filename, filetype, filesize, attrs)
         finally:
             cur.close()
         return
@@ -380,7 +380,7 @@ class FileDB:
         return
 
     def list(self, args):
-        for (eid, timestamp, filetype, filesize, attrs) in self._list_entry(args):
+        for (eid, timestamp, _, filetype, filesize, attrs) in self.list_entry(args):
             tags = [ v for (k,v) in attrs if k == 'tag' ]
             attrs = dict(attrs)
             a = []
