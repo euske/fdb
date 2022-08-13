@@ -126,7 +126,6 @@ def identify_image(path, thumb_size=(128,128)):
 MDB_DEFS = '''
 CREATE TABLE IF NOT EXISTS Entries (
   entryId INTEGER PRIMARY KEY,
-  timestamp TEXT,
   fileId TEXT,
   fileType TEXT,
   fileSize INTEGER,
@@ -136,6 +135,9 @@ CREATE TABLE IF NOT EXISTS Attrs (
   entryId INTEGER,
   attrName TEXT,
   attrValue TEXT);
+
+CREATE INDEX IF NOT EXISTS AttrsIndex ON Attrs (
+  entryId, attrName);
 
 CREATE TABLE IF NOT EXISTS Logs (
   actionId INTEGER PRIMARY KEY,
@@ -277,20 +279,25 @@ class FileDB:
         return path
 
     def get_entry(self, eid):
-        for (timestamp, fileid, filetype, filesize) in self._cur.execute(
-                'SELECT timestamp, fileId, fileType, fileSize FROM Entries'
-                ' WHERE entryId=?;',
+        for (fileid, filetype, filesize, timestamp) in self._cur.execute(
+                'SELECT fileId, fileType, fileSize, attrValue'
+                ' FROM Entries, Attrs'
+                ' WHERE Entries.entryId=? AND Entries.entryId=Attrs.entryId'
+                ' AND Attrs.attrName="timestamp";',
                 (eid,)):
-            return (timestamp, fileid, filetype, filesize)
+            return (fileid, filetype, filesize, timestamp)
         raise KeyError(eid)
 
     def list_entry(self, query):
         cur = self.mdb.cursor()
-        sql = 'SELECT entryId, timestamp, fileId, fileType, fileSize FROM Entries ORDER BY timestamp DESC;'
+        sql = ('SELECT Entries.entryId, fileId, fileType, fileSize, attrValue'
+               ' FROM Entries, Attrs'
+               ' WHERE Entries.entryId=Attrs.entryId'
+               ' AND Attrs.attrName="timestamp" ORDER BY attrValue DESC;')
         try:
-            for (eid, timestamp, fileid, filetype, filesize) in cur.execute(sql):
+            for (eid, fileid, filetype, filesize, timestamp) in cur.execute(sql):
                 attrs = self._get_attrs(eid)
-                yield (eid, timestamp, fileid, filetype, filesize, attrs)
+                yield (eid, fileid, filetype, filesize, timestamp, attrs)
         finally:
             cur.close()
         return
@@ -318,7 +325,7 @@ class FileDB:
             fileid = uuid.uuid4().hex + ext.lower()
             (filetype,_) = mimetypes.guess_type(path)
             cur.execute(
-                'INSERT INTO Entries VALUES (NULL, NULL, ?, ?, ?, ?);',
+                'INSERT INTO Entries VALUES (NULL, ?, ?, ?, ?);',
                 (fileid, filetype, filesize, filehash))
             eid = cur.lastrowid
             return (fileid, filetype, eid)
@@ -347,12 +354,15 @@ class FileDB:
         if not self.dryrun:
             dst = self.get_path(self.origdir, fileid)
             shutil.copyfile(path, dst)
-        attrs = [('path', relpath)]
+        st = os.stat(path)
+        mtime = st[stat.ST_MTIME]
+        attrs = [('path', relpath), ('mtime', mtime)]
         for w in get_words(relpath):
             attrs.append(('tag', w))
         for t in (tags or []):
             attrs.append(('tag', t))
-        timestamp = thumbnail = None
+        timestamp = None
+        thumbnail = None
         if filetype is None:
             pass
         elif filetype.startswith('video/') or filetype.startswith('audio/'):
@@ -364,11 +374,7 @@ class FileDB:
                 path, thumb_size=self.THUMB_SIZE)
             attrs.extend(attrs1.items())
         if timestamp is None:
-            st = os.stat(path)
             timestamp = time2str(time.gmtime(st[stat.ST_CTIME]))
-        self._cur.execute(
-            'UPDATE Entries SET timestamp=? WHERE entryId=?;',
-            (timestamp, eid))
         attrs.append(('timestamp', timestamp))
         self._add_attrs(eid, attrs)
         if not self.dryrun and thumbnail is not None:
@@ -380,7 +386,7 @@ class FileDB:
         return
 
     def list(self, args):
-        for (eid, timestamp, _, filetype, filesize, attrs) in self.list_entry(args):
+        for (eid, _, filetype, filesize, timestamp, attrs) in self.list_entry(args):
             tags = [ v for (k,v) in attrs if k == 'tag' ]
             attrs = dict(attrs)
             a = []
