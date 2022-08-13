@@ -190,11 +190,11 @@ class DBRequestHandler(SimpleHTTPRequestHandler):
 
     def convert_path(self, path):
         assert path.startswith('/')
-        (category,_,name) = path[1:].partition('/')
+        (category,_,fileid) = path[1:].partition('/')
         if category == 'orig':
-            return self.DB.get_path(self.DB.origdir, name)
+            return self.DB.get_path(self.DB.origdir, fileid)
         elif category == 'thumb':
-            return self.DB.get_path(self.DB.thumbdir, name)
+            return self.DB.get_path(self.DB.thumbdir, fileid)
         else:
             raise self.HTTPError(HTTPStatus.BAD_REQUEST)
 
@@ -248,6 +248,8 @@ class FileDB:
     MDB_NAME = 'metadata.db'
     THUMB_SIZE = (128,128)
 
+    class DuplicateEntry(Exception): pass
+
     def __init__(self, basedir, dryrun=0):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.basedir = basedir
@@ -269,13 +271,13 @@ class FileDB:
         self.mdb.executescript(MDB_DEFS)
         return
 
-    def get_path(self, subdir, name):
-        assert 2 < len(name)
-        prefix = name[:2]
+    def get_path(self, subdir, fileid):
+        assert 2 < len(fileid)
+        prefix = fileid[:2]
         dirpath = os.path.join(subdir, prefix)
         if not os.path.exists(dirpath):
             os.makedirs(dirpath)
-        path = os.path.join(dirpath, name)
+        path = os.path.join(dirpath, fileid)
         return path
 
     def get_entry(self, eid):
@@ -311,24 +313,23 @@ class FileDB:
             attrs.append((attrName, attrValue))
         return attrs
 
-    def _add_entry(self, path):
-        self.logger.debug(f'add_entry: {path}')
+    def _add_entry(self, srcpath, relpath):
+        self.logger.debug(f'add_entry: {srcpath} {relpath}')
         cur = self._cur
-        (filesize, filehash) = get_filehash(path)
-        for (eid,filetype) in cur.execute(
-                'SELECT entryId, fileType FROM Entries'
+        (filesize, filehash) = get_filehash(srcpath)
+        for (eid,) in cur.execute(
+                'SELECT entryId FROM Entries'
                 ' WHERE fileSize=? AND fileHash=?;',
                 (filesize, filehash)):
-            return (None, filetype, eid)
-        else:
-            (_,ext) = os.path.splitext(path)
-            fileid = uuid.uuid4().hex + ext.lower()
-            (filetype,_) = mimetypes.guess_type(path)
-            cur.execute(
-                'INSERT INTO Entries VALUES (NULL, ?, ?, ?, ?);',
-                (fileid, filetype, filesize, filehash))
-            eid = cur.lastrowid
-            return (fileid, filetype, eid)
+            raise self.DuplicateEntry(eid)
+        (_,ext) = os.path.splitext(srcpath)
+        fileid = uuid.uuid4().hex + ext.lower()
+        (filetype,_) = mimetypes.guess_type(srcpath)
+        cur.execute(
+            'INSERT INTO Entries VALUES (NULL, ?, ?, ?, ?);',
+            (fileid, filetype, filesize, filehash))
+        eid = cur.lastrowid
+        return (fileid, filetype, eid)
 
     def _add_attrs(self, eid, attrs):
         self.logger.debug(f'add_attrs: {eid} {attrs}')
@@ -345,16 +346,17 @@ class FileDB:
         return
 
     def add(self, basedir, relpath, tags=None):
-        path = os.path.join(basedir, relpath)
-        (fileid, filetype, eid) = self._add_entry(path)
-        if fileid is None:
+        srcpath = os.path.join(basedir, relpath)
+        try:
+            (fileid, filetype, eid) = self._add_entry(srcpath, relpath)
+        except self.DuplicateEntry:
             self.logger.info(f'ignored: {relpath!r}...')
             return
         self.logger.info(f'adding: {relpath!r}...')
         if not self.dryrun:
-            dst = self.get_path(self.origdir, fileid)
-            shutil.copyfile(path, dst)
-        st = os.stat(path)
+            dstpath = self.get_path(self.origdir, fileid)
+            shutil.copyfile(srcpath, dstpath)
+        st = os.stat(srcpath)
         mtime = st[stat.ST_MTIME]
         attrs = [('path', relpath), ('mtime', mtime)]
         for w in get_words(relpath):
@@ -367,11 +369,11 @@ class FileDB:
             pass
         elif filetype.startswith('video/') or filetype.startswith('audio/'):
             (timestamp, attrs1, thumbnail) = identify_video(
-                path, thumb_size=self.THUMB_SIZE)
+                srcpath, thumb_size=self.THUMB_SIZE)
             attrs.extend(attrs1.items())
         elif filetype.startswith('image/'):
             (timestamp, attrs1, thumbnail) = identify_image(
-                path, thumb_size=self.THUMB_SIZE)
+                srcpath, thumb_size=self.THUMB_SIZE)
             attrs.extend(attrs1.items())
         if timestamp is None:
             timestamp = time2str(time.gmtime(st[stat.ST_CTIME]))
@@ -379,8 +381,8 @@ class FileDB:
         self._add_attrs(eid, attrs)
         if not self.dryrun and thumbnail is not None:
             (name,_) = os.path.splitext(fileid)
-            dst = self.get_path(self.thumbdir, name+'.jpg')
-            with open(dst, 'wb') as fp:
+            dstpath = self.get_path(self.thumbdir, name+'.jpg')
+            with open(dstpath, 'wb') as fp:
                 fp.write(thumbnail)
         self._add_log(eid, 'add')
         return
