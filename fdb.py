@@ -250,13 +250,14 @@ class FileDB:
 
     class DuplicateEntry(Exception): pass
 
-    def __init__(self, basedir, dryrun=0):
+    def __init__(self, basedir, strict=False, dryrun=False):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.basedir = basedir
         self.origdir = os.path.join(basedir, 'orig')
         os.makedirs(self.origdir, exist_ok=True)
         self.thumbdir = os.path.join(basedir, 'thumb')
         os.makedirs(self.thumbdir, exist_ok=True)
+        self.strict = strict
         self.dryrun = dryrun
         self.mdb = sqlite3.connect(os.path.join(basedir, self.MDB_NAME))
         self._init_mdb()
@@ -316,6 +317,18 @@ class FileDB:
     def _add_entry(self, srcpath, relpath):
         self.logger.debug(f'add_entry: {srcpath} {relpath}')
         cur = self._cur
+        if not self.strict:
+            st = os.stat(srcpath)
+            mtime = st[stat.ST_MTIME]
+            fsize = st[stat.ST_SIZE]
+            for (eid,) in cur.execute(
+                    'SELECT Entries.entryId FROM Entries, Attrs AS A1, Attrs AS A2'
+                    ' WHERE Entries.entryId=A1.entryId AND Entries.entryId=A2.entryId'
+                    ' AND Entries.fileSize=?'
+                    ' AND A1.attrName="path" AND A1.attrValue=?'
+                    ' AND A2.attrName="mtime" AND A2.attrValue=?',
+                    (fsize, relpath, mtime)):
+                raise self.DuplicateEntry(eid)
         (filesize, filehash) = get_filehash(srcpath)
         for (eid,) in cur.execute(
                 'SELECT entryId FROM Entries'
@@ -471,19 +484,21 @@ def main(argv):
               '[-v] [-n] basedir {add|remove|list|show|tag|server} [args ...]')
         return 100
     try:
-        (opts, args) = getopt.getopt(argv[1:], 'vn')
+        (opts, args) = getopt.getopt(argv[1:], 'vsn')
     except getopt.GetoptError:
         return usage()
     level = logging.INFO
+    strict = False
     dryrun = False
     for (k, v) in opts:
         if k == '-v': level = logging.DEBUG
+        elif k == '-s': strict = True
         elif k == '-n': dryrun = True
     logging.basicConfig(format='%(asctime)s %(levelname)s %(name)s %(message)s', level=level)
 
     if not args: return usage()
     basedir = args.pop(0)
-    db = FileDB(basedir, dryrun=dryrun)
+    db = FileDB(basedir, strict=strict, dryrun=dryrun)
     try:
         db.run(args)
     finally:
