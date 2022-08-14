@@ -21,7 +21,7 @@ from io import BytesIO
 from http import HTTPStatus
 from http.server import HTTPServer
 from http.server import SimpleHTTPRequestHandler
-from PIL import Image, ExifTags, UnidentifiedImageError
+from PIL import Image, ImageOps, ExifTags, UnidentifiedImageError
 from subprocess import Popen, PIPE, DEVNULL
 
 def time2str(t):
@@ -34,16 +34,13 @@ def get_words(text):
     return [ w.lower() for w in WORDS.findall(text) ]
 
 def get_filehash(path, bufsize=1024*1024):
-    filesize = 0
     h = hashlib.sha1()
     with open(path, 'rb') as fp:
         while True:
             data = fp.read(bufsize)
-            filesize += len(data)
             if not data: break
             h.update(data)
-    filehash = h.hexdigest()
-    return (filesize, filehash)
+    return h.hexdigest()
 
 def get_thumbnail(img, size):
     img.thumbnail(size)
@@ -51,10 +48,30 @@ def get_thumbnail(img, size):
     img.save(fp, format='jpeg')
     return fp.getvalue()
 
-def identify_video(path, position=0, thumb_size=(128,128)):
+def get_thumb_video(path, position=0, thumb_size=(128,128)):
+    args = (
+        'ffmpeg', '-y', '-ss', str(position),
+        '-i', path, '-f', 'image2', '-vframes', '1', '-')
+    try:
+        p = Popen(args, stdin=DEVNULL, stdout=PIPE, stderr=DEVNULL, encoding=None)
+        data = p.stdout.read()
+        p.wait()
+        img = Image.open(BytesIO(data))
+        return get_thumbnail(img, thumb_size)
+    except OSError:
+        return None
+
+def get_thumb_image(path, thumb_size=(128,128)):
+    try:
+        img = Image.open(path)
+        img = ImageOps.exif_transpose(img)
+        return get_thumbnail(img, thumb_size)
+    except (OSError, UnidentifiedImageError):
+        return None
+
+def identify_video(path):
     timestamp = None
     attrs = { 'duration':0, 'width':0, 'height':0 }
-    thumbnail = None
     args = (
         'ffprobe', '-of', 'json', '-show_format', '-show_streams',
         path)
@@ -80,23 +97,11 @@ def identify_video(path, position=0, thumb_size=(128,128)):
         p.wait()
     except OSError:
         pass
-    args = (
-        'ffmpeg', '-y', '-ss', str(position),
-        '-i', path, '-f', 'image2', '-vframes', '1', '-')
-    try:
-        p = Popen(args, stdin=DEVNULL, stdout=PIPE, stderr=DEVNULL, encoding=None)
-        data = p.stdout.read()
-        p.wait()
-        img = Image.open(BytesIO(data))
-        thumbnail = get_thumbnail(img, thumb_size)
-    except OSError:
-        pass
-    return (timestamp, attrs, thumbnail)
+    return (timestamp, attrs)
 
-def identify_image(path, thumb_size=(128,128)):
+def identify_image(path):
     timestamp = None
     attrs = {}
-    thumbnail = None
     try:
         img = Image.open(path)
         attrs['width'] = img.width
@@ -118,10 +123,9 @@ def identify_image(path, thumb_size=(128,128)):
             elif k == 'DateTime' or k == 'DateTimeOriginal':
                 t = time.strptime(v, '%Y:%m:%d %H:%M:%S')
                 timestamp = time2str(t)
-        thumbnail = get_thumbnail(img.rotate(rotation), thumb_size)
     except (OSError, UnidentifiedImageError):
         pass
-    return (timestamp, attrs, thumbnail)
+    return (timestamp, attrs)
 
 MDB_DEFS = '''
 CREATE TABLE IF NOT EXISTS Entries (
@@ -317,19 +321,19 @@ class FileDB:
     def _add_entry(self, srcpath, relpath):
         self.logger.debug(f'add_entry: {srcpath} {relpath}')
         cur = self._cur
+        st = os.stat(srcpath)
+        filesize = st[stat.ST_SIZE]
         if not self.strict:
-            st = os.stat(srcpath)
             mtime = st[stat.ST_MTIME]
-            fsize = st[stat.ST_SIZE]
             for (eid,) in cur.execute(
                     'SELECT Entries.entryId FROM Entries, Attrs AS A1, Attrs AS A2'
                     ' WHERE Entries.entryId=A1.entryId AND Entries.entryId=A2.entryId'
                     ' AND Entries.fileSize=?'
                     ' AND A1.attrName="path" AND A1.attrValue=?'
                     ' AND A2.attrName="mtime" AND A2.attrValue=?',
-                    (fsize, relpath, mtime)):
+                    (filesize, relpath, mtime)):
                 raise self.DuplicateEntry(eid)
-        (filesize, filehash) = get_filehash(srcpath)
+        filehash = get_filehash(srcpath)
         for (eid,) in cur.execute(
                 'SELECT entryId FROM Entries'
                 ' WHERE fileSize=? AND fileHash=?;',
@@ -381,13 +385,13 @@ class FileDB:
         if filetype is None:
             pass
         elif filetype.startswith('video/') or filetype.startswith('audio/'):
-            (timestamp, attrs1, thumbnail) = identify_video(
-                srcpath, thumb_size=self.THUMB_SIZE)
+            (timestamp, attrs1) = identify_video(srcpath)
             attrs.extend(attrs1.items())
+            thumbnail = get_thumb_video(srcpath, thumb_size=self.THUMB_SIZE)
         elif filetype.startswith('image/'):
-            (timestamp, attrs1, thumbnail) = identify_image(
-                srcpath, thumb_size=self.THUMB_SIZE)
+            (timestamp, attrs1) = identify_image(srcpath)
             attrs.extend(attrs1.items())
+            thumbnail = get_thumb_image(srcpath, thumb_size=self.THUMB_SIZE)
         if timestamp is None:
             timestamp = time2str(time.gmtime(st[stat.ST_CTIME]))
         attrs.append(('timestamp', timestamp))
