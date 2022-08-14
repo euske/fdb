@@ -192,8 +192,8 @@ class DBRequestHandler(SimpleHTTPRequestHandler):
     def convert_path(self, path):
         assert path.startswith('/')
         (category,_,fileid) = path[1:].partition('/')
-        if category == 'orig':
-            return self.DB.get_path(self.DB.origdir, fileid)
+        if category == 'files':
+            return self.DB.get_path(self.DB.filesdir, fileid)
         elif category == 'thumb':
             return self.DB.get_path(self.DB.thumbdir, fileid)
         else:
@@ -254,8 +254,8 @@ class FileDB:
     def __init__(self, basedir, strict=False, dryrun=False):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.basedir = basedir
-        self.origdir = os.path.join(basedir, 'orig')
-        os.makedirs(self.origdir, exist_ok=True)
+        self.filesdir = os.path.join(basedir, 'files')
+        os.makedirs(self.filesdir, exist_ok=True)
         self.thumbdir = os.path.join(basedir, 'thumb')
         os.makedirs(self.thumbdir, exist_ok=True)
         self.strict = strict
@@ -368,7 +368,7 @@ class FileDB:
             return
         self.logger.info(f'adding: {relpath!r}...')
         if not self.dryrun:
-            dstpath = self.get_path(self.origdir, fileid)
+            dstpath = self.get_path(self.filesdir, fileid)
             shutil.copyfile(srcpath, dstpath)
         st = os.stat(srcpath)
         mtime = st[stat.ST_MTIME]
