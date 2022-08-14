@@ -69,8 +69,7 @@ def get_thumb_image(path, thumb_size=(128,128)):
     except (OSError, UnidentifiedImageError):
         return None
 
-def identify_video(path):
-    timestamp = None
+def get_attrs_video(path):
     attrs = { 'duration':0, 'width':0, 'height':0 }
     args = (
         'ffprobe', '-of', 'json', '-show_format', '-show_streams',
@@ -86,7 +85,7 @@ def identify_video(path):
             if 'creation_time' in tags:
                 v = tags['creation_time']
                 t = time.strptime(v[:19], '%Y-%m-%dT%H:%M:%S')
-                timestamp = time2str(t)
+                attrs['timestamp'] = time2str(t)
         for strm in obj['streams']:
             if 'width' in strm:
                 v = strm['width']
@@ -97,10 +96,9 @@ def identify_video(path):
         p.wait()
     except OSError:
         pass
-    return (timestamp, attrs)
+    return attrs
 
-def identify_image(path):
-    timestamp = None
+def get_attrs_image(path):
     attrs = {}
     try:
         img = Image.open(path)
@@ -121,11 +119,10 @@ def identify_image(path):
                     rotation = 270
                 attrs['rotation'] = rotation
             elif k == 'DateTime' or k == 'DateTimeOriginal':
-                t = time.strptime(v, '%Y:%m:%d %H:%M:%S')
-                timestamp = time2str(t)
+                attrs['timestamp'] = time.strptime(v, '%Y:%m:%d %H:%M:%S')
     except (OSError, UnidentifiedImageError):
         pass
-    return (timestamp, attrs)
+    return attrs
 
 MDB_DEFS = '''
 CREATE TABLE IF NOT EXISTS Entries (
@@ -380,21 +377,19 @@ class FileDB:
             attrs.append(('tag', w))
         for t in (tags or []):
             attrs.append(('tag', t))
-        timestamp = None
+        attrs1 = {}
         thumbnail = None
         if filetype is None:
             pass
         elif filetype.startswith('video/') or filetype.startswith('audio/'):
-            (timestamp, attrs1) = identify_video(srcpath)
-            attrs.extend(attrs1.items())
+            attrs1 = get_attrs_video(srcpath)
             thumbnail = get_thumb_video(srcpath, thumb_size=self.THUMB_SIZE)
         elif filetype.startswith('image/'):
-            (timestamp, attrs1) = identify_image(srcpath)
-            attrs.extend(attrs1.items())
+            attrs1 = get_attrs_image(srcpath)
             thumbnail = get_thumb_image(srcpath, thumb_size=self.THUMB_SIZE)
-        if timestamp is None:
-            timestamp = time2str(time.gmtime(st[stat.ST_CTIME]))
-        attrs.append(('timestamp', timestamp))
+        if 'timestamp' not in attrs1:
+            attrs1['timestamp'] = time2str(time.gmtime(st[stat.ST_CTIME]))
+        attrs.extend(attrs1.items())
         self._add_attrs(eid, attrs)
         if not self.dryrun and thumbnail is not None:
             (name,_) = os.path.splitext(fileid)
